@@ -6,12 +6,13 @@ from torch.backends import cudnn
 from torch.utils.data import Subset
 import json
 import random
+import matplotlib.pyplot as plt
 import numpy as np
 
 import sys
 sys.path.append('../..')
-sys.path.append('/home/bruno/xfang/GenrativeMethod/model/pytorch3dunet')
 from CTDataset import StrokeAI
+from model import StarGenerator3D
 
 def str2bool(v):
     return v.lower() in ('true')
@@ -55,6 +56,41 @@ def train_test_split(dataset, test_size=0.2, random_seed=42, indices_file=None):
 
     return train_dataset, test_dataset
 
+def save_pictures(real_CT, real_MR, fake_MR, label, sample_path):
+    real_A = real_CT.cpu().numpy()[0, 0]
+    real_B = real_MR.cpu().numpy()[0, 0]
+    fake_B = fake_MR.cpu().numpy()[0, 0]
+    label_data = label.cpu().numpy()[0, 0]
+    
+    fig, axs = plt.subplots(4, 12, sharex=True, figsize=(120, 40))
+    plt.subplots_adjust(hspace=0, wspace=0, left=0.15, right=0.95, top=0.95, bottom=0.05)
+    
+    # Adjust the spacing of the subplots to create space for row captions
+    # plt.subplots_adjust(hspace=0, wspace=0, left=0.1, right=0.95, top=0.95, bottom=0)
+    
+    row_labels = ['Real CT', 'Real MRI', 'Fake MRI', 'Label']
+
+    for i in range(12):
+        axs[0, i].imshow(real_A[:, :, i], cmap=plt.cm.gray)
+        axs[0, i].axis('off')
+
+        axs[1, i].imshow(real_B[:, :, i], cmap=plt.cm.gray)
+        axs[1, i].axis('off')
+
+        axs[2, i].imshow(fake_B[:, :, i], cmap=plt.cm.gray)
+        axs[2, i].axis('off')
+
+        axs[3, i].imshow(label_data[:, :, i], cmap=plt.cm.gray)
+        axs[3, i].axis('off')
+
+    # Add captions for each row
+    for ax, row_label in zip(axs, row_labels):
+        # Position the text to the left of the first subplot in each row
+        ax[0].text(-0.15, 0.5, row_label, transform=ax[0].transAxes, fontsize=75, color='red', va='center', ha='right')
+
+    plt.savefig(sample_path)
+    plt.close()
+
 def main(config):
     # For fast training.
     cudnn.benchmark = True
@@ -71,31 +107,35 @@ def main(config):
 
     # Data loader.
     dataset = StrokeAI(CT_root="/home/bruno/xfang/dataset/images",
-                       MRI_root="/scratch4/rsteven1/DWI_coregis_20231208", 
+                       MRI_root="/scratch4/rsteven1/examples", 
                        label_root="/home/bruno/xfang/dataset/labels", 
+                       map_file="/home/bruno/xfang/GenrativeMethod/efficient_ct_dir_name_to_XNATSessionID_mapping.json",
                        bounding_box=True,
-                       instance_normalize=True, 
+                       normalize=False, 
                        padding=True, 
-                    #    slicing=True,
-                       crop=True)
-    
+                       slicing=True)
     train_dataset, test_dataset = train_test_split(dataset, test_size=0.2, random_seed=42, 
-                                                   indices_file='/home/bruno/3D-Laision-Seg/GenrativeMethod/dataset_indices.json')
+                                                   indices_file='/home/bruno/xfang/GenrativeMethod/dataset_indices.json')
     dataloader = torch.utils.data.DataLoader(
             test_dataset,
             batch_size=config.batch_size,
             shuffle=not config.serial_batches,
             num_workers=int(config.num_workers))
     
+    model = StarGenerator3D()
+    checkpoint_path = "/home/bruno/xfang/GenrativeMethod/model/CT2MRI_3DGAN/CT2MRI_3DGAN/models/125000-G.ckpt"
+    model.load_state_dict(torch.load(checkpoint_path, map_location=lambda storage, loc: storage))
 
-    # Solver for training and testing StarGAN.
-    solver = Solver(dataloader, config)
-
-    if config.mode == 'train':
-        solver.train()
-    elif config.mode == 'test':
-        solver.test()
-
+    with torch.no_grad():
+        for i, sample in enumerate(dataloader):
+            CT = sample['ct']
+            gen_MRI = model(CT)
+            MRI = sample['mri']
+            label = sample['label']
+            save_path = f"./test/test_{i}.jpg"
+            save_pictures(CT, MRI, gen_MRI, label, save_path)
+    # load pretrained model
+    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -122,7 +162,7 @@ if __name__ == '__main__':
     parser.add_argument('--serial_batches', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
 
     # Test configuration.
-    parser.add_argument('--test_iters', type=int, default=135000, help='test model from this step')
+    parser.add_argument('--test_iters', type=int, default=200000, help='test model from this step')
 
     # Miscellaneous.
     parser.add_argument('--num_workers', type=int, default=4) 
@@ -136,7 +176,7 @@ if __name__ == '__main__':
 
     # Step size.
     parser.add_argument('--log_step', type=int, default=10) 
-    parser.add_argument('--sample_step', type=int, default=5000) 
+    parser.add_argument('--sample_step', type=int, default=1000) 
     parser.add_argument('--model_save_step', type=int, default=5000) 
     parser.add_argument('--lr_update_step', type=int, default=1000) 
 

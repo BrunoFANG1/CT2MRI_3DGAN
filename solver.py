@@ -10,6 +10,12 @@ import time
 import datetime
 import matplotlib.pyplot as plt
 
+import sys
+
+sys.path.append('/home/bruno/3D-Laision-Seg/GenrativeMethod/model/pytorch3dunet')
+
+from unet3d.model import UNet3D
+from unet3d.losses import DiceLoss
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
@@ -30,7 +36,7 @@ class Solver(object):
         self.lambda_gp = config.lambda_gp
 
         # Training configurations.
-        self.dataset = config.dataset
+        # self.dataset = config.dataset
         self.batch_size = config.batch_size
         self.num_iters = config.num_iters
         self.num_iters_decay = config.num_iters_decay
@@ -40,9 +46,11 @@ class Solver(object):
         self.beta1 = config.beta1
         self.beta2 = config.beta2
         self.resume_iters = config.resume_iters
-        self.selected_attrs = config.selected_attrs
+        # self.selected_attrs = config.selected_attrs
         
         self.criterionL1 = torch.nn.L1Loss()
+
+        self.seg_loss = DiceLoss(normalization='none')
 
         # Test configurations.
         self.test_iters = config.test_iters
@@ -73,15 +81,21 @@ class Solver(object):
         """Create a generator and a discriminator."""
         self.G = StarGenerator3D()
         self.D = StarDiscriminator3D()
+
+        # add seg model
+        # self.S = UNet3D(in_channels=1, out_channels=1, num_levels=3)
         
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
+        # self.s_optimizer = torch.optim.Adam(self.S.parameters(), self.g_lr, [self.beta1, self.beta2])
         
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
+        # self.print_network(self.S, 'S')
             
         self.G.to(self.device)
         self.D.to(self.device)
+        # self.S.to(self.device)
 
     def print_network(self, model, name):
         """Print out the network information."""
@@ -137,27 +151,36 @@ class Solver(object):
         return torch.mean((dydx_l2norm-1)**2)
 
         
-    def save_pictures(self, real_CT, real_MR, fake_MR, sample_path):
+    def save_pictures(self, real_CT, real_MR, fake_MR, real_label, sample_path):
         real_A = real_CT.cpu().numpy()[0, 0]
         real_B = real_MR.cpu().numpy()[0, 0]
         fake_B = fake_MR.cpu().numpy()[0, 0]
+        real_label = real_label.cpu().numpy()[0, 0]
         
-        fig, axs = plt.subplots(3, 12, sharex=True, figsize=(120, 30))
-        plt.subplots_adjust(hspace =0)
-        for i in range(0, 12):
+        fig, axs = plt.subplots(4, 56, sharex=True, figsize=(120, 30))
+
+        # Adjust spacing here
+        plt.subplots_adjust(hspace=0.05, wspace=0)
+
+        for i in range(0, 56):
             axs[0, i].imshow(real_A[:, :, i], cmap=plt.cm.gray)
             axs[0, i].axis('off')
-            #axs[0].set_yticks(np.arange(-0.9, 1.0, 0.4))
-    
+
             axs[1, i].imshow(real_B[:, :, i], cmap=plt.cm.gray)
             axs[1, i].axis('off')
-            #axs[1].set_yticks(np.arange(0.1, 1.0, 0.2))
-    
+
             axs[2, i].imshow(fake_B[:, :, i], cmap=plt.cm.gray)
             axs[2, i].axis('off')
-        plt.tight_layout()
+
+            axs[3, i].imshow(real_label[:, :, i], cmap=plt.cm.gray)
+            axs[3, i].axis('off')
+
+        # Comment out the tight_layout or adjust its parameters if necessary
+        # plt.tight_layout()
+
         plt.savefig(sample_path)
         plt.close()
+
 
     def train(self):
         # Set data loader.
@@ -184,9 +207,10 @@ class Solver(object):
                 data_iter = iter(data_loader)
                 input_data = next(data_iter)
             
-            real_CT = input_data['CT'].to(self.device).float()
-            real_MR = input_data['MR'].to(self.device).float()
-            image_paths = input_data['CT_path']
+            real_CT = input_data['ct'].to(self.device).float()
+            real_MR = input_data['mri'].to(self.device).float()
+            # real_label = input_data['label'].to(self.device).float()
+            # image_paths = input_data['CT_path']
           
             # Train the discriminator 
 
@@ -222,20 +246,27 @@ class Solver(object):
                 # Original-to-target domain.
                 fake_MR = self.G(real_CT)
                 out_src = self.D(fake_MR)
+                # out_seg = self.S(fake_MR) 
+
                 g_loss_fake = - torch.mean(out_src)
                 
                 # L1 loss
                 g_loss_L1 = self.criterionL1(fake_MR, real_MR) * 100
 
+                # # seg loss
+                # g_seg_loss = self.seg_loss(out_seg, real_label) * 100
+
                 # Backward and optimize.
-                g_loss = g_loss_fake + g_loss_L1
+                g_loss = g_loss_fake + g_loss_L1 # + g_seg_loss
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
+                # self.s_optimizer.step()
 
                 # Logging.
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_L1'] = g_loss_L1.item()
+                # loss['S/loss_seg'] = g_seg_loss.item()
 
             #  Miscellaneous                                    
 
@@ -255,10 +286,13 @@ class Solver(object):
             # Translate fixed images for debugging.
             if (i+1) % self.sample_step == 0:
                 with torch.no_grad():
-                    patient_ID = image_paths[0].split('/')[-1].split('.')[0]
+                    # patient_ID = image_paths[0].split('/')[-1].split('.')[0]
+                    patient_ID = 'test'
             
+                    label = input_data['label'].to(self.device).float()
                     sample_path = os.path.join(self.sample_dir, '{0}-images_{1}.jpg'.format(i+1, patient_ID))
-                    self.save_pictures(real_CT, real_MR, fake_MR, sample_path)
+                    print(f"sample path is {sample_path}")
+                    self.save_pictures(real_CT, real_MR, fake_MR, label, sample_path)
                     #save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
                     print('Saved real and fake images into {}...'.format(sample_path))
 
@@ -288,19 +322,28 @@ class Solver(object):
         data_loader = self.dataloader
         
         with torch.no_grad():
-            for i, (x_real, c_org) in enumerate(data_loader):
+            for i, input_data in enumerate(data_loader):
 
-                # Prepare input images and target domain labels.
-                x_real = x_real.to(self.device)
-                c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
-
-                # Translate images.
-                x_fake_list = [x_real]
-                for c_trg in c_trg_list:
-                    x_fake_list.append(self.G(x_real, c_trg))
-
-                # Save the translated images.
-                x_concat = torch.cat(x_fake_list, dim=3)
+                real_CT = input_data['ct'].to(self.device).float()
+                real_MR = input_data['mri'].to(self.device).float()
+                fake_MR = self.G(real_CT)
+                real_label = input_data['label'].to(self.device).float()
                 result_path = os.path.join(self.result_dir, '{}-images.jpg'.format(i+1))
-                save_image(self.denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+                self.save_pictures(real_CT, real_MR, fake_MR, real_label, result_path)
                 print('Saved real and fake images into {}...'.format(result_path))
+
+                # x_real = sample['mri']
+                # # Prepare input images and target domain labels.
+                # x_real = x_real.to(self.device)
+                # c_trg_list = self.create_labels(c_org, self.c_dim, self.dataset, self.selected_attrs)
+
+                # # Translate images.
+                # x_fake_list = [x_real]
+                # for c_trg in c_trg_list:
+                #     x_fake_list.append(self.G(x_real, c_trg))
+
+                # # Save the translated images.
+                # x_concat = torch.cat(x_fake_list, dim=3)
+                # result_path = os.path.join(self.result_dir, '{}-images.jpg'.format(i+1))
+                # save_image(self.denorm(x_concat.data.cpu()), result_path, nrow=1, padding=0)
+                # print('Saved real and fake images into {}...'.format(result_path))
